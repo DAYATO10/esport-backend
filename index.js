@@ -5,9 +5,12 @@ require('dotenv').config();
 const pool = require('./db');
 const verifyToken = require('./authMiddleware');
 const teamRoutes = require('./routes/teams');
+const tournamentRoutes = require('./routes/tournaments');
+
 const app = express();
 app.use(express.json());
 app.use('/teams', teamRoutes);
+app.use('/tournaments', tournamentRoutes);
 
 // Route de test pour vérifier la liaison avec Supabase
 app.get('/health', async (req, res) => {
@@ -122,6 +125,7 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Erreur serveur lors de la connexion.' });
   }
 });
+
 // 3. PROFIL DU JOUEUR CONNECTÉ (Route protégée par JWT)
 app.get('/me', verifyToken, async (req, res) => {
   try {
