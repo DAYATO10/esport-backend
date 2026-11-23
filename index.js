@@ -4,8 +4,10 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const pool = require('./db');
 const verifyToken = require('./authMiddleware');
+const teamRoutes = require('./routes/teams');
 const app = express();
 app.use(express.json());
+app.use('/teams', teamRoutes);
 
 // Route de test pour vérifier la liaison avec Supabase
 app.get('/health', async (req, res) => {
