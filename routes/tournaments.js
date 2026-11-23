@@ -247,5 +247,107 @@ router.patch('/matches/:matchId/score', verifyToken, async (req, res) => {
     res.status(500).json({ error: 'Erreur serveur lors de l’enregistrement du score.' });
   }
 });
+// 6. DÉTAILS D'UN TOURNOI + LISTE DES MATCHS (GET /tournaments/:id) — Publique
+router.get('/:id', async (req, res) => {
+  const tournamentId = req.params.id;
+
+  try {
+    const tournamentResult = await pool.query(
+      `SELECT t.id, t.name, t.game, t.max_teams, t.status, u.username AS organizer_username, t.created_at
+       FROM tournaments t
+       JOIN users u ON t.created_by = u.id
+       WHERE t.id = $1`,
+      [tournamentId]
+    );
+
+    if (tournamentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Tournoi introuvable.' });
+    }
+
+    const matchesResult = await pool.query(
+      `SELECT
+         m.id,
+         m.status,
+         m.score_a,
+         m.score_b,
+         m.winner_id,
+         m.played_at,
+         ta.id AS team_a_id,
+         ta.name AS team_a_name,
+         ta.tag AS team_a_tag,
+         tb.id AS team_b_id,
+         tb.name AS team_b_name,
+         tb.tag AS team_b_tag
+       FROM matches m
+       JOIN teams ta ON m.team_a_id = ta.id
+       JOIN teams tb ON m.team_b_id = tb.id
+       WHERE m.tournament_id = $1
+       ORDER BY m.created_at ASC`,
+      [tournamentId]
+    );
+
+    res.json({
+      tournament: tournamentResult.rows[0],
+      matches: matchesResult.rows,
+    });
+  } catch (err) {
+    console.error('Erreur GET /tournaments/:id :', err.message);
+    if (err.code === '22P02') {
+      return res.status(400).json({ error: 'Format d’identifiant de tournoi invalide.' });
+    }
+    res.status(500).json({ error: 'Erreur serveur lors de la récupération du tournoi.' });
+  }
+});
+
+// 7. CLASSEMENT D'UN TOURNOI (GET /tournaments/:id/standings) — Publique
+// Barème EA FC : Victoire = 3 pts, Nul = 1 pt, Défaite = 0 pt
+router.get('/:id/standings', async (req, res) => {
+  const tournamentId = req.params.id;
+
+  try {
+    const result = await pool.query(
+      `SELECT
+         t.id AS team_id,
+         t.name AS team_name,
+         t.tag AS team_tag,
+         COUNT(m.id)::int AS played,
+         COALESCE(SUM(CASE WHEN m.winner_id = t.id THEN 1 ELSE 0 END), 0)::int AS wins,
+         COALESCE(SUM(CASE WHEN m.id IS NOT NULL AND m.winner_id IS NULL THEN 1 ELSE 0 END), 0)::int AS draws,
+         COALESCE(SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id <> t.id THEN 1 ELSE 0 END), 0)::int AS losses,
+         COALESCE(SUM(CASE WHEN m.team_a_id = t.id THEN m.score_a ELSE m.score_b END), 0)::int AS goals_for,
+         COALESCE(SUM(CASE WHEN m.team_a_id = t.id THEN m.score_b ELSE m.score_a END), 0)::int AS goals_against,
+         (COALESCE(SUM(CASE WHEN m.team_a_id = t.id THEN m.score_a ELSE m.score_b END), 0)
+          - COALESCE(SUM(CASE WHEN m.team_a_id = t.id THEN m.score_b ELSE m.score_a END), 0))::int AS goal_diff,
+         COALESCE(SUM(
+           CASE
+             WHEN m.winner_id = t.id THEN 3
+             WHEN m.id IS NOT NULL AND m.winner_id IS NULL THEN 1
+             ELSE 0
+           END
+         ), 0)::int AS points
+       FROM tournament_teams tt
+       JOIN teams t ON tt.team_id = t.id
+       LEFT JOIN matches m
+         ON m.tournament_id = tt.tournament_id
+         AND m.status = 'finished'
+         AND (m.team_a_id = t.id OR m.team_b_id = t.id)
+       WHERE tt.tournament_id = $1
+       GROUP BY t.id, t.name, t.tag
+       ORDER BY points DESC, goal_diff DESC, goals_for DESC`,
+      [tournamentId]
+    );
+
+    res.json({
+      tournament_id: tournamentId,
+      standings: result.rows,
+    });
+  } catch (err) {
+    console.error('Erreur GET /tournaments/:id/standings :', err.message);
+    if (err.code === '22P02') {
+      return res.status(400).json({ error: 'Format d’identifiant de tournoi invalide.' });
+    }
+    res.status(500).json({ error: 'Erreur serveur lors du calcul du classement.' });
+  }
+});
 
 module.exports = router;

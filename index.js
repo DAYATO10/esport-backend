@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
@@ -8,6 +9,7 @@ const teamRoutes = require('./routes/teams');
 const tournamentRoutes = require('./routes/tournaments');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 app.use('/teams', teamRoutes);
 app.use('/tournaments', tournamentRoutes);
