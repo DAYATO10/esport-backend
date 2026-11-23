@@ -14,6 +14,22 @@ router.post('/', verifyToken, async (req, res) => {
     });
   }
 
+  // Validation stricte : longueur et format
+  const trimmedName = name.trim();
+  const trimmedTag = tag.trim().toUpperCase();
+
+  if (trimmedName.length < 2 || trimmedName.length > 50) {
+    return res.status(400).json({
+      error: 'Le nom d\'équipe doit contenir entre 2 et 50 caractères.',
+    });
+  }
+
+  if (trimmedTag.length < 2 || trimmedTag.length > 5) {
+    return res.status(400).json({
+      error: 'Le tag d\'équipe doit contenir entre 2 et 5 caractères.',
+    });
+  }
+
   const client = await pool.connect();
 
   try {
@@ -24,7 +40,7 @@ router.post('/', verifyToken, async (req, res) => {
       `INSERT INTO teams (name, tag, captain_id)
        VALUES ($1, $2, $3)
        RETURNING id, name, tag, captain_id, created_at`,
-      [name.trim(), tag.trim().toUpperCase(), captainId]
+      [trimmedName, trimmedTag, captainId]
     );
 
     const newTeam = teamResult.rows[0];

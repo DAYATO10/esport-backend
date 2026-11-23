@@ -199,9 +199,13 @@ router.patch('/matches/:matchId/score', verifyToken, async (req, res) => {
   const { score_a, score_b } = req.body;
   const requesterId = req.user.id;
 
-  if (score_a === undefined || score_b === undefined || score_a < 0 || score_b < 0) {
+  // Conversion et validation stricte : les scores doivent être des entiers >= 0
+  const scoreA = Number(score_a);
+  const scoreB = Number(score_b);
+
+  if (!Number.isInteger(scoreA) || !Number.isInteger(scoreB) || scoreA < 0 || scoreB < 0) {
     return res.status(400).json({
-      error: 'score_a et score_b doivent être des nombres positifs ou nuls.',
+      error: 'score_a et score_b doivent être des nombres entiers positifs ou nuls.',
     });
   }
 
@@ -225,17 +229,17 @@ router.patch('/matches/:matchId/score', verifyToken, async (req, res) => {
       });
     }
 
-    // Calcul automatique du vainqueur côté serveur
+    // Calcul automatique du vainqueur côté serveur (utilise les valeurs validées)
     let winnerId = null;
-    if (score_a > score_b) winnerId = match.team_a_id;
-    else if (score_b > score_a) winnerId = match.team_b_id;
+    if (scoreA > scoreB) winnerId = match.team_a_id;
+    else if (scoreB > scoreA) winnerId = match.team_b_id;
 
     const updated = await pool.query(
       `UPDATE matches
        SET score_a = $1, score_b = $2, winner_id = $3, status = 'finished', played_at = NOW()
        WHERE id = $4
        RETURNING id, tournament_id, team_a_id, team_b_id, score_a, score_b, winner_id, status, played_at`,
-      [score_a, score_b, winnerId, matchId]
+      [scoreA, scoreB, winnerId, matchId]
     );
 
     res.json({
