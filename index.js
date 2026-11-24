@@ -9,6 +9,7 @@ const pool = require('./db');
 const authRoutes = require('./routes/auth');
 const teamRoutes = require('./routes/teams');
 const tournamentRoutes = require('./routes/tournaments');
+const notificationRoutes = require('./routes/notifications');
 
 const app = express();
 
@@ -58,6 +59,7 @@ app.use(globalLimiter);
 app.use('/auth', authRoutes);
 app.use('/teams', teamRoutes);
 app.use('/tournaments', tournamentRoutes);
+app.use('/notifications', notificationRoutes);
 
 // Route de test pour vérifier la liaison avec Supabase
 app.get('/health', async (req, res) => {

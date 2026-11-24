@@ -3,31 +3,68 @@ const router = express.Router();
 const pool = require('../db');
 const verifyToken = require('../authMiddleware');
 
-// 1. CRÉER UNE ÉQUIPE (POST /teams) — Protégée par JWT
+// 1. OBTENIR MON ESCOUADE (GET /teams/my-squad) — Connecté
+router.get('/my-squad', verifyToken, async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    // Chercher si l'utilisateur est membre ou capitaine d'une équipe
+    const memberCheck = await pool.query(
+      `SELECT t.id, t.name, t.tag, t.captain_id, t.created_at, tm.member_role
+       FROM team_members tm
+       JOIN teams t ON tm.team_id = t.id
+       WHERE tm.user_id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.json({ squad: null, members: [] });
+    }
+
+    const squad = memberCheck.rows[0];
+
+    // Récupérer les membres avec leurs UIDs CODM
+    const membersResult = await pool.query(
+      `SELECT u.id, u.username, u.game_uid, tm.member_role, tm.joined_at
+       FROM team_members tm
+       JOIN users u ON tm.user_id = u.id
+       WHERE tm.team_id = $1
+       ORDER BY tm.joined_at ASC`,
+      [squad.id]
+    );
+
+    res.json({
+      squad: {
+        ...squad,
+        is_captain: squad.captain_id === userId,
+      },
+      members: membersResult.rows,
+    });
+  } catch (err) {
+    console.error('Erreur GET /teams/my-squad :', err.message);
+    res.status(500).json({ error: 'Erreur serveur.' });
+  }
+});
+
+// 2. CRÉER UNE ÉQUIPE (POST /teams) — Connecté
 router.post('/', verifyToken, async (req, res) => {
   const { name, tag } = req.body;
-  const captainId = req.user.id; // Issu du token JWT, jamais du body
+  const captainId = req.user.id;
 
   if (!name || !tag) {
-    return res.status(400).json({
-      error: 'Les champs name et tag sont obligatoires.',
-    });
+    return res.status(400).json({ error: 'Nom et tag requis.' });
   }
 
-  // Validation stricte : longueur et format
   const trimmedName = name.trim();
   const trimmedTag = tag.trim().toUpperCase();
 
   if (trimmedName.length < 2 || trimmedName.length > 50) {
-    return res.status(400).json({
-      error: 'Le nom d\'équipe doit contenir entre 2 et 50 caractères.',
-    });
+    return res.status(400).json({ error: 'Nom entre 2 et 50 caractères.' });
   }
 
   if (trimmedTag.length < 2 || trimmedTag.length > 5) {
-    return res.status(400).json({
-      error: 'Le tag d\'équipe doit contenir entre 2 et 5 caractères.',
-    });
+    return res.status(400).json({ error: 'Tag entre 2 et 5 caractères.' });
   }
 
   const client = await pool.connect();
@@ -35,7 +72,13 @@ router.post('/', verifyToken, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Insérer l'équipe
+    // Vérifier si l'utilisateur n'est pas déjà dans une équipe
+    const existing = await client.query('SELECT id FROM team_members WHERE user_id = $1', [captainId]);
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: 'Vous appartenez déjà à une escouade.' });
+    }
+
     const teamResult = await client.query(
       `INSERT INTO teams (name, tag, captain_id)
        VALUES ($1, $2, $3)
@@ -45,131 +88,91 @@ router.post('/', verifyToken, async (req, res) => {
 
     const newTeam = teamResult.rows[0];
 
-    // Ajouter automatiquement le créateur dans team_members comme 'captain'
     await client.query(
       `INSERT INTO team_members (team_id, user_id, member_role)
-       VALUES ($1, $2, $3)`,
-      [newTeam.id, captainId, 'captain']
+       VALUES ($1, $2, 'captain')`,
+      [newTeam.id, captainId]
     );
 
     await client.query('COMMIT');
 
     res.status(201).json({
-      message: 'Équipe créée avec succès.',
+      message: 'Escouade créée avec succès.',
       team: newTeam,
     });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('Erreur POST /teams :', err.message);
-
-    // Code PostgreSQL 23505 = violation de contrainte UNIQUE (nom ou tag déjà pris)
     if (err.code === '23505') {
-      return res.status(409).json({
-        error: 'Ce nom ou ce tag d’équipe est déjà utilisé.',
-      });
+      return res.status(409).json({ error: 'Ce nom ou tag est déjà utilisé.' });
     }
-
-    res.status(500).json({ error: 'Erreur serveur lors de la création de l’équipe.' });
+    console.error('Erreur POST /teams :', err.message);
+    res.status(500).json({ error: 'Erreur serveur.' });
   } finally {
     client.release();
   }
 });
 
-// 2. LISTER LES ÉQUIPES (GET /teams) — Publique
-router.get('/', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT 
-        t.id,
-        t.name,
-        t.tag,
-        t.captain_id,
-        u.username AS captain_username,
-        COUNT(tm.id)::int AS members_count,
-        t.created_at
-      FROM teams t
-      JOIN users u ON t.captain_id = u.id
-      LEFT JOIN team_members tm ON t.id = tm.team_id
-      GROUP BY t.id, u.username
-      ORDER BY t.created_at DESC
-    `);
-
-    res.json({
-      count: result.rows.length,
-      teams: result.rows,
-    });
-  } catch (err) {
-    console.error('Erreur GET /teams :', err.message);
-    res.status(500).json({ error: 'Erreur serveur lors de la récupération des équipes.' });
-  }
-});
-
-// 3. AJOUTER UN JOUEUR À UNE ÉQUIPE (POST /teams/:id/members) — Capitaine uniquement
+// 3. AJOUTER UN COÉQUIPIER PAR PSEUDO OU UID CODM (POST /teams/:id/members)
 router.post('/:id/members', verifyToken, async (req, res) => {
   const teamId = req.params.id;
-  const { username } = req.body;
+  const { username, game_uid } = req.body;
   const requesterId = req.user.id;
 
-  if (!username) {
-    return res.status(400).json({
-      error: 'Veuillez indiquer le pseudo (username) du joueur à ajouter.',
-    });
+  if (!username && !game_uid) {
+    return res.status(400).json({ error: 'Veuillez indiquer le pseudo ou l’UID CODM du coéquipier.' });
   }
 
   try {
-    // Vérifier que l'équipe existe et que l'appelant est bien le capitaine
-    const teamResult = await pool.query(
-      'SELECT id, captain_id FROM teams WHERE id = $1',
-      [teamId]
-    );
-
-    if (teamResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Équipe introuvable.' });
-    }
-
+    const teamResult = await pool.query('SELECT id, captain_id FROM teams WHERE id = $1', [teamId]);
+    if (teamResult.rows.length === 0) return res.status(404).json({ error: 'Escouade introuvable.' });
     if (teamResult.rows[0].captain_id !== requesterId) {
-      return res.status(403).json({
-        error: 'Action refusée : seul le capitaine peut ajouter des membres.',
-      });
+      return res.status(403).json({ error: 'Seul le capitaine peut ajouter des coéquipiers.' });
     }
 
-    // Chercher le joueur à ajouter via son username
-    const userResult = await pool.query(
-      'SELECT id, username FROM users WHERE username = $1',
-      [username]
-    );
+    // Vérifier limite escouade (max 4 pour CODM Squad)
+    const count = await pool.query('SELECT COUNT(*)::int AS total FROM team_members WHERE team_id = $1', [teamId]);
+    if (count.rows[0].total >= 4) {
+      return res.status(400).json({ error: 'Votre escouade est déjà complète (max 4 joueurs).' });
+    }
+
+    // Trouver le joueur
+    let userResult;
+    if (username) {
+      userResult = await pool.query('SELECT id, username, game_uid FROM users WHERE username = $1', [username.trim()]);
+    } else {
+      userResult = await pool.query('SELECT id, username, game_uid FROM users WHERE game_uid = $1', [game_uid.trim()]);
+    }
 
     if (userResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Joueur introuvable.' });
+      return res.status(404).json({ error: 'Joueur introuvable avec ces identifiants.' });
     }
 
-    const playerToAdd = userResult.rows[0];
+    const player = userResult.rows[0];
 
-    // Vérifier qu'il n'est pas déjà membre de cette équipe
-    const existingMember = await pool.query(
-      'SELECT id FROM team_members WHERE team_id = $1 AND user_id = $2',
-      [teamId, playerToAdd.id]
-    );
-
-    if (existingMember.rows.length > 0) {
-      return res.status(409).json({ error: 'Ce joueur fait déjà partie de l’équipe.' });
+    // Vérifier s'il n'est pas déjà dans l'équipe
+    const inTeam = await pool.query('SELECT id FROM team_members WHERE user_id = $1', [player.id]);
+    if (inTeam.rows.length > 0) {
+      return res.status(409).json({ error: 'Ce joueur fait déjà partie d’une escouade.' });
     }
 
-    // Insérer le joueur dans team_members
     const memberResult = await pool.query(
       `INSERT INTO team_members (team_id, user_id, member_role)
-       VALUES ($1, $2, $3)
+       VALUES ($1, $2, 'member')
        RETURNING id, team_id, user_id, member_role, joined_at`,
-      [teamId, playerToAdd.id, 'member']
+      [teamId, player.id]
     );
 
     res.status(201).json({
-      message: `${playerToAdd.username} a rejoint l’équipe.`,
-      member: memberResult.rows[0],
+      message: `${player.username} a rejoint l’escouade.`,
+      member: {
+        ...memberResult.rows[0],
+        username: player.username,
+        game_uid: player.game_uid,
+      },
     });
   } catch (err) {
     console.error('Erreur POST /teams/:id/members :', err.message);
-    res.status(500).json({ error: 'Erreur serveur lors de l’ajout du membre.' });
+    res.status(500).json({ error: 'Erreur serveur.' });
   }
 });
 
